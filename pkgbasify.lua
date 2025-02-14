@@ -33,6 +33,8 @@ function main()
 		assert(f:write("BACKUP_LIBRARIES=yes\n"))
 	end
 	
+	fetch_parent_for_merge()
+	
 	if not os.execute("pkg update") then
 		fatal("pkg update failed.")
 	end
@@ -135,6 +137,58 @@ function base_repo_url()
 	else
 		fatal("unsupported FreeBSD version: " .. raw)
 	end
+end
+
+function fetch_file(url, checksum)
+	if not os.execute("fetch " .. url .. "/m/" .. checksum .. ".gz") then
+		fatal("fetch failed")
+	end
+	if not os.execute("gunzip " .. checksum ".gz") then
+		fatal("extract failed")
+	end
+	if capture("sha256 -q " .. checksum):gsub("%s+", "") ~= checksum then
+		fatal("checksum mismatch")
+	end
+end
+
+function fetch_parent_for_merge()
+	print("fetching public key")
+	-- XXX de-hardcode URL
+	local url = "http://update.freebsd.org/14.1-RELEASE/amd64"
+	os.remove("pub.ssl")
+	if not os.execute("fetch " .. url .. "/pub.ssl") then
+		fatal("fetch failed")
+	end
+
+	local sha256_expected = "800651ef4b4c71c27e60786d7b487188970f4b4169cc055784e21eb71d410cc5"
+	local sha256_actual = capture("sha256 -q pub.ssl"):gsub("%s+", "")
+	if sha256_actual ~= sha256_expected then
+		fatal("pub.ssl checksum mismatch")
+	end
+	
+	print("fetching tag")
+	os.remove("latest.ssl")
+	if not os.execute("fetch " .. url .. "/latest.ssl") then
+		fatal("fetch failed")
+	end
+
+	os.remove("tag.new")
+	if not os.execute("openssl pkeyutl -pubin -inkey pub.ssl -verifyrecover	< latest.ssl > tag.new") then
+		fatal("verify failed")
+	end
+	
+	local tindexhash = capture("cut -f 5 -d '|' < tag.new"):gsub("%s+", "")
+	if not os.execute("fetch " .. url .. "/t/" .. tindexhash) then
+		fatal("fetch failed")
+	end
+	
+	if capture("sha256 -q " .. tindexhash):gsub("%s+", "") ~= tindexhash then
+		fatal("tindex checksum mismatch")
+	end
+	
+	local index_all = capture("grep " .. tindexhash .. " " .. tindexhash):gsub("%s+", ""):gsub("INDEX%-ALL|")
+	fetch_file(index_all)
+
 end
 
 -- Returns a list of pkgbase packages matching the files present on the system
@@ -258,4 +312,6 @@ function fatal(msg)
 	os.exit(1)
 end
 
-main()
+--main()
+os.execute("mkdir -p /tmp/pkgbasify && cd /tmp/pkgbasify")
+fetch_parent_for_merge()

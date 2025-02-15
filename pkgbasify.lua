@@ -139,24 +139,26 @@ function base_repo_url()
 	end
 end
 
--- TODO directory
--- TODO URL version
-function fetch_parent_for_merge()
-	-- XXX de-hardcode URL
-	local url = "http://update.freebsd.org/14.1-RELEASE/amd64"
-	os.remove("pub.ssl")
-	assert(os.execute("fetch " .. url .. "/pub.ssl"))
+function fetch_parent_for_merge(dir)
+	local version = assert(capture("freebsd-version"):match("(%d+%.%d+%-%u+)"))
+	local arch = capture("uname -m"):gsub("%s+", "")
+	local baseurl = "http://update.freebsd.org/" .. version .. "/" .. arch .. "/"
 
-	local sha256_expected = "800651ef4b4c71c27e60786d7b487188970f4b4169cc055784e21eb71d410cc5"
-	assert(os.execute("sha256 -c " .. sha256_expected .. " pub.ssl >/dev/null 2>&1"))
-	
-	os.remove("latest.ssl")
-	assert(os.execute("fetch " .. url .. "/latest.ssl"))
+	os.remove(dir .. "/pub.ssl")
+	assert(fetch(dir, baseurl .. "/pub.ssl"))
 
-	os.remove("tag.new")
-	assert(os.execute("openssl pkeyutl -pubin -inkey pub.ssl -verifyrecover	< latest.ssl > tag.new"))
+	local pub_ssl_checksum = "800651ef4b4c71c27e60786d7b487188970f4b4169cc055784e21eb71d410cc5"
+	assert(os.execute("sha256 -c " .. pub_ssl_checksum .. " " ..
+		dir .."/pub.ssl >/dev/null 2>&1"))
 	
-	local tag_it = slurp("tag.new"):gmatch("[^|]+")
+	os.remove(dir .. "/latest.ssl")
+	assert(fetch(dir, baseurl .. "/latest.ssl"))
+
+	os.remove(dir .. "/tag.new")
+	assert(os.execute("cd " .. dir ..
+		" && openssl pkeyutl -pubin -inkey pub.ssl -verifyrecover < latest.ssl > tag.new"))
+	
+	local tag_it = slurp(dir .. "/tag.new"):gmatch("[^|]+")
 	assert(tag_it() == "freebsd-update")
 	assert(tag_it() == "amd64")
 	assert(tag_it() == "14.1-RELEASE")
@@ -165,17 +167,17 @@ function fetch_parent_for_merge()
 	assert(tag_it()) -- EOL time
 	assert(tag_it() == nil)
 	
-	assert(os.execute("fetch " .. url .. "/t/" .. tindex))
-	assert(verify_checksum(tindex))
+	assert(fetch(dir, baseurl .. "/t/" .. tindex))
+	assert(verify_checksum(dir, tindex))
 
-	local index_all = assert(slurp(tindex):match("INDEX%-ALL|(%x+)\n"))
-	fetch_file(url .. "/m/", index_all)
+	local index_all = assert(slurp(dir .. "/" .. tindex):match("INDEX%-ALL|(%x+)\n"))
+	fetch_file(dir, baseurl .. "/m/", index_all)
 
-	local files = parse_index(index_all)
+	local files = parse_index(dir .. "/" .. index_all)
 	for path, checksum in pairs(files) do
 		if path:match("^/etc/") then
 			-- TODO batching using phttpget would make this faster
-			fetch_file(url .. "/f/", checksum)
+			fetch_file(dir, baseurl .. "/f/", checksum)
 		end
 	end
 end
@@ -212,17 +214,22 @@ function parse_index(index_path)
 	return files
 end
 
-function fetch_file(url, checksum)
-	if verify_checksum(checksum) then
+function fetch_file(outdir, baseurl, checksum)
+	if verify_checksum(outdir, checksum) then
 		return
 	end
-	assert(os.execute("fetch " .. url .. checksum .. ".gz"))
-	assert(os.execute("gunzip " .. checksum .. ".gz"))
-	assert(verify_checksum(checksum))
+	assert(fetch(outdir, baseurl .. checksum .. ".gz"))
+	assert(os.execute("gunzip " .. outdir .. "/" .. checksum .. ".gz"))
+	assert(verify_checksum(outdir, checksum))
 end
 
-function verify_checksum(checksum)
-	return os.execute("sha256 -c " .. checksum .. " " .. checksum .. " >/dev/null 2>&1")
+function fetch(outdir, url)
+	return os.execute("fetch -o " .. outdir .. " " .. url)
+end
+
+function verify_checksum(dir, checksum)
+	return os.execute("sha256 -c " .. checksum .. " " ..
+		dir .. "/" .. checksum .. " >/dev/null 2>&1")
 end
 
 -- Returns a list of pkgbase packages matching the files present on the system
@@ -354,4 +361,5 @@ function fatal(msg)
 end
 
 --main()
-fetch_parent_for_merge()
+assert(os.execute("mkdir -p /tmp/pkgbasify"))
+fetch_parent_for_merge("/tmp/pkgbasify")

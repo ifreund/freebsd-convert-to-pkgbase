@@ -139,56 +139,90 @@ function base_repo_url()
 	end
 end
 
-function fetch_file(url, checksum)
-	if not os.execute("fetch " .. url .. "/m/" .. checksum .. ".gz") then
-		fatal("fetch failed")
-	end
-	if not os.execute("gunzip " .. checksum ".gz") then
-		fatal("extract failed")
-	end
-	if capture("sha256 -q " .. checksum):gsub("%s+", "") ~= checksum then
-		fatal("checksum mismatch")
-	end
-end
-
+-- TODO directory
+-- TODO URL version
 function fetch_parent_for_merge()
-	print("fetching public key")
 	-- XXX de-hardcode URL
 	local url = "http://update.freebsd.org/14.1-RELEASE/amd64"
 	os.remove("pub.ssl")
-	if not os.execute("fetch " .. url .. "/pub.ssl") then
-		fatal("fetch failed")
-	end
+	assert(os.execute("fetch " .. url .. "/pub.ssl"))
 
 	local sha256_expected = "800651ef4b4c71c27e60786d7b487188970f4b4169cc055784e21eb71d410cc5"
-	local sha256_actual = capture("sha256 -q pub.ssl"):gsub("%s+", "")
-	if sha256_actual ~= sha256_expected then
-		fatal("pub.ssl checksum mismatch")
-	end
+	assert(os.execute("sha256 -c " .. sha256_expected .. " pub.ssl >/dev/null 2>&1"))
 	
-	print("fetching tag")
 	os.remove("latest.ssl")
-	if not os.execute("fetch " .. url .. "/latest.ssl") then
-		fatal("fetch failed")
-	end
+	assert(os.execute("fetch " .. url .. "/latest.ssl"))
 
 	os.remove("tag.new")
-	if not os.execute("openssl pkeyutl -pubin -inkey pub.ssl -verifyrecover	< latest.ssl > tag.new") then
-		fatal("verify failed")
-	end
+	assert(os.execute("openssl pkeyutl -pubin -inkey pub.ssl -verifyrecover	< latest.ssl > tag.new"))
 	
-	local tindexhash = capture("cut -f 5 -d '|' < tag.new"):gsub("%s+", "")
-	if not os.execute("fetch " .. url .. "/t/" .. tindexhash) then
-		fatal("fetch failed")
-	end
+	local tag_it = slurp("tag.new"):gmatch("[^|]+")
+	assert(tag_it() == "freebsd-update")
+	assert(tag_it() == "amd64")
+	assert(tag_it() == "14.1-RELEASE")
+	assert(tag_it()) -- patch level
+	local tindex = assert(tag_it())
+	assert(tag_it()) -- EOL time
+	assert(tag_it() == nil)
 	
-	if capture("sha256 -q " .. tindexhash):gsub("%s+", "") ~= tindexhash then
-		fatal("tindex checksum mismatch")
-	end
-	
-	local index_all = capture("grep " .. tindexhash .. " " .. tindexhash):gsub("%s+", ""):gsub("INDEX%-ALL|")
-	fetch_file(index_all)
+	assert(os.execute("fetch " .. url .. "/t/" .. tindex))
+	assert(verify_checksum(tindex))
 
+	local index_all = assert(slurp(tindex):match("INDEX%-ALL|(%x+)\n"))
+	fetch_file(url .. "/m/", index_all)
+
+	local files = parse_index(index_all)
+	for path, checksum in pairs(files) do
+		if path:match("^/etc/") then
+			-- TODO batching using phttpget would make this faster
+			fetch_file(url .. "/f/", checksum)
+		end
+	end
+end
+
+-- Parses the index file at the given path and returns a table mapping every
+-- file path in the index to the file's checksum
+function parse_index(index_path)
+	local files = {}
+	local index_file = assert(io.open(index_path))
+	for line in index_file:lines() do
+		local it = line:gmatch("[^|]+")
+		assert(it()) -- kernel/world/etc.
+		assert(it()) -- base/base-dbg/lib32/etc.
+		local path = assert(it())
+		local type = assert(it()) -- f/d/L for file/directory/symlink
+		assert(type == "f" or type == "d" or type == "L")
+		assert(it()) -- 0?
+		assert(it()) -- 0?
+		assert(it()) -- mode (e.g. 0755)
+		assert(it()) -- 0?
+		if type == "f" then
+			local checksum = assert(it())
+			it() -- maybe the new file name?
+			assert(it() == nil)
+			files[path] = checksum
+		elseif type == "L" then
+			assert(it()) -- symlink target
+			assert(it() == nil)
+		else
+			assert(type == "d")
+			assert(it() == nil)
+		end
+	end
+	return files
+end
+
+function fetch_file(url, checksum)
+	if verify_checksum(checksum) then
+		return
+	end
+	assert(os.execute("fetch " .. url .. checksum .. ".gz"))
+	assert(os.execute("gunzip " .. checksum .. ".gz"))
+	assert(verify_checksum(checksum))
+end
+
+function verify_checksum(checksum)
+	return os.execute("sha256 -c " .. checksum .. " " .. checksum .. " >/dev/null 2>&1")
 end
 
 -- Returns a list of pkgbase packages matching the files present on the system
@@ -291,6 +325,13 @@ function capture(command)
 	return output
 end
 
+function slurp(path)
+	local f = assert(io.open(path))
+	local contents = assert(f:read("*a"))
+	assert(f:close())
+	return contents
+end
+
 function append_list(list, other)
 	for _, item in ipairs(other) do
 		table.insert(list, item)
@@ -313,5 +354,4 @@ function fatal(msg)
 end
 
 --main()
-os.execute("mkdir -p /tmp/pkgbasify && cd /tmp/pkgbasify")
 fetch_parent_for_merge()
